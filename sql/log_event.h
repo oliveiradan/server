@@ -1157,7 +1157,7 @@ public:
   void print_header(IO_CACHE* file, PRINT_EVENT_INFO* print_event_info,
                     bool is_more);
   void print_base64(IO_CACHE* file, PRINT_EVENT_INFO* print_event_info,
-                    bool is_more);
+                    bool do_print_decoded_base64);
 #endif
   /*
     read_log_event() functions read an event from a binlog or relay
@@ -4895,10 +4895,32 @@ public:
 static inline bool copy_event_cache_to_file_and_reinit(IO_CACHE *cache,
                                                        FILE *file)
 {
-  return         
-    my_b_copy_to_file(cache, file) ||
+  return
+    my_b_copy_to_file_frag(cache, file, 1, NULL, NULL, NULL, NULL, NULL) ||
     reinit_io_cache(cache, WRITE_CACHE, 0, FALSE, TRUE);
 }
+
+
+/**
+  The same as above but copying is made in steps of the number of
+  fragments, and each step is wrapped with writing to the file @c
+  before_frag and @c after_frag formated strings.
+*/
+inline bool copy_cache_frag_to_file_and_reinit(IO_CACHE *cache,
+                                               FILE *file,
+                                               uint n_frag,
+                                               const char* before_frag,
+                                               const char* after_frag,
+                                               const char* after_last,
+                                               const char* after_last_per_frag,
+                                               char* buf)
+{
+  return
+    my_b_copy_to_file_frag(cache, file, n_frag, before_frag, after_frag,
+                           after_last, after_last_per_frag, buf) ||
+    reinit_io_cache(cache, WRITE_CACHE, 0, FALSE, TRUE);
+}
+
 
 #ifdef MYSQL_SERVER
 /*****************************************************************************
