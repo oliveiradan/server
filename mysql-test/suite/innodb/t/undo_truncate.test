@@ -3,16 +3,18 @@
 #
 
 --source include/have_innodb.inc
-# This test is restarting the server.
---source include/not_embedded.inc
 # With larger innodb_page_size, the undo log tablespaces do not grow enough.
---source include/have_innodb_max_16k.inc
+--source include/innodb_page_size_small.inc
 --source include/have_undo_tablespaces.inc
 
 call mtr.add_suppression("InnoDB: The transaction log size is too large");
-SET GLOBAL innodb_fast_shutdown=0;
---let $restart_parameters=--innodb_undo_tablespaces=2 --innodb_undo_logs=4
---source include/restart_mysqld.inc
+
+SET @save_undo_logs = @@GLOBAL.innodb_undo_logs;
+SET @save_frequency = @@GLOBAL.innodb_purge_rseg_truncate_frequency;
+SET @save_truncate = @@GLOBAL.innodb_undo_log_truncate;
+SET GLOBAL innodb_undo_logs = 4;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = 1;
+SET GLOBAL innodb_undo_log_truncate = 0;
 
 #-----------------------------------------------------------------------------
 #
@@ -45,6 +47,7 @@ END |
 delimiter ;|
 #
 #
+let DATADIR = `select @@datadir`;
 connect (con1,localhost,root,,);
 begin;
 send call populate_t1();
@@ -58,21 +61,52 @@ connection con2; reap; send update t2 set c = 'mysql';
 connection con1; reap; send update t1 set c = 'oracle';
 connection con2; reap; send update t2 set c = 'oracle';
 connection con1; reap; send delete from t1;
-connection con2; reap; send delete from t2;
+connection con2; reap; delete from t2;
+
+let CHECKFILE = $MYSQL_TMP_DIR/check.txt;
+perl;
+($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size1)
+	= stat("$ENV{DATADIR}/undo001");
+($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size2)
+	= stat("$ENV{DATADIR}/undo002");
+open(OUT, ">$ENV{CHECKFILE}") || die;
+print OUT "let \$size1='$size1,$size2';\n";
+close(OUT);
+EOF
+
 connection con1; reap; commit; disconnect con1;
-connection con2; reap; commit; disconnect con2;
+connection con2; commit; disconnect con2;
 
 connection default;
 drop table t1, t2;
 drop PROCEDURE populate_t1;
 drop PROCEDURE populate_t2;
 
-SET GLOBAL innodb_fast_shutdown=0;
-SET GLOBAL innodb_undo_log_truncate=1;
-SET GLOBAL innodb_purge_rseg_truncate_frequency=1;
+SET GLOBAL innodb_undo_log_truncate = 1;
+--source include/wait_all_purged.inc
+--source $CHECKFILE
+perl;
+($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size1)
+	= stat("$ENV{DATADIR}/undo001");
+($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size2)
+	= stat("$ENV{DATADIR}/undo002");
+open(OUT, ">$ENV{CHECKFILE}") || die;
+print OUT "let \$size2='$size1,$size2';\n";
+close(OUT);
+EOF
 
---source include/restart_mysqld.inc
+--source $CHECKFILE
+--remove_file $CHECKFILE
+
+if ($size1 == $size2)
+{
+   echo Truncation did not happen: $size1;
+}
+
+SET GLOBAL innodb_undo_logs = @save_undo_logs;
+SET GLOBAL innodb_purge_rseg_truncate_frequency = @save_frequency;
+SET GLOBAL innodb_undo_log_truncate = @save_truncate;
 
 let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = Truncating UNDO tablespace 1;
+let SEARCH_PATTERN = Truncating UNDO tablespace.*;
 --source include/search_pattern_in_file.inc
