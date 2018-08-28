@@ -1991,6 +1991,9 @@ trx_undo_truncate_tablespace(
 	/* Write-ahead the redo log record. */
 	log_write_up_to(mtr.commit_lsn(), true);
 
+	/* Remove any discarded pages from the flush lists. */
+	buf_LRU_flush_or_remove_pages(space->id, NULL, size);
+
 	/* Trim the file size. */
 	os_file_truncate(file->name, file->handle,
 			 os_offset_t(size) << srv_page_size_shift, true);
