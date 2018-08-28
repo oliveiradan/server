@@ -536,18 +536,22 @@ truncate of the UNDO is in progress. This file is required during recovery
 to complete the truncate. */
 
 namespace undo {
+	/** Magic Number to indicate truncate action is complete. */
+	static const ib_uint32_t		s_magic = 76845412;
 
 	/** Populate log file name based on space_id
 	@param[in]	space_id	id of the undo tablespace.
 	@return DB_SUCCESS or error code */
-	dberr_t populate_log_file_name(
+	static dberr_t populate_log_file_name(
 		ulint	space_id,
 		char*&	log_file_name)
 	{
-		ulint log_file_name_sz =
-			strlen(srv_log_group_home_dir) + 22 + 1 /* NUL */
-			+ strlen(undo::s_log_prefix)
-			+ strlen(undo::s_log_ext);
+		static const char s_log_prefix[] = "undo_";
+		static const char s_log_ext[] = "trunc.log";
+
+		ulint log_file_name_sz = strlen(srv_log_group_home_dir)
+			+ (22 - 1 /* NUL */
+			   + sizeof s_log_prefix + sizeof s_log_ext);
 
 		log_file_name = new (std::nothrow) char[log_file_name_sz];
 		if (log_file_name == 0) {
@@ -569,61 +573,10 @@ namespace undo {
 
 		snprintf(log_file_name + log_file_name_len,
 			 log_file_name_sz - log_file_name_len,
-			 "%s%lu_%s", undo::s_log_prefix,
-			 (ulong) space_id, s_log_ext);
+			 "%s" ULINTPF "_%s", s_log_prefix,
+			 space_id, s_log_ext);
 
 		return(DB_SUCCESS);
-	}
-
-	/** Create the truncate log file.
-	@param[in]	space_id	id of the undo tablespace to truncate.
-	@return DB_SUCCESS or error code. */
-	dberr_t init(ulint space_id)
-	{
-		dberr_t		err;
-		char*		log_file_name;
-
-		/* Step-1: Create the log file name using the pre-decided
-		prefix/suffix and table id of undo tablepsace to truncate. */
-		err = populate_log_file_name(space_id, log_file_name);
-		if (err != DB_SUCCESS) {
-			return(err);
-		}
-
-		/* Step-2: Create the log file, open it and write 0 to
-		indicate init phase. */
-		bool            ret;
-		os_file_t	handle = os_file_create(
-			innodb_log_file_key, log_file_name, OS_FILE_CREATE,
-			OS_FILE_NORMAL, OS_LOG_FILE, srv_read_only_mode, &ret);
-		if (!ret) {
-			delete[] log_file_name;
-			return(DB_IO_ERROR);
-		}
-
-		ulint	sz = UNIV_PAGE_SIZE;
-		void*	buf = ut_zalloc_nokey(sz + UNIV_PAGE_SIZE);
-		if (buf == NULL) {
-			os_file_close(handle);
-			delete[] log_file_name;
-			return(DB_OUT_OF_MEMORY);
-		}
-
-		byte*	log_buf = static_cast<byte*>(
-			ut_align(buf, UNIV_PAGE_SIZE));
-
-		IORequest	request(IORequest::WRITE);
-
-		err = os_file_write(
-			request, log_file_name, handle, log_buf, 0, sz);
-
-		os_file_flush(handle);
-		os_file_close(handle);
-
-		ut_free(buf);
-		delete[] log_file_name;
-
-		return(err);
 	}
 
 	/** Mark completion of undo truncate action by writing magic number to
@@ -998,31 +951,16 @@ trx_purge_initiate_truncate(
 
 
 	/* Step-3: Start the actual truncate.
-	a. log-checkpoint
-	b. Write the DDL log to protect truncate action from CRASH
-	c. Remove rseg instance if added to purge queue before we
+	a. optional redo log checkpoint, to avoid overflow during execution
+	b. Remove rseg instance if added to purge queue before we
 	   initiate truncate.
-	d. Execute actual truncate
-	e. Remove the DDL log. */
+	c. Execute actual truncate */
 
-	/* After truncate if server crashes then redo logging done for this
-	undo tablespace might not stand valid as tablespace has been
-	truncated. */
-	log_make_checkpoint_at(LSN_MAX, TRUE);
+	log_free_check();
 
 	const ulint space_id = undo_trunc->get_marked_space_id();
 
 	ib::info() << "Truncating UNDO tablespace " << space_id;
-
-#ifdef UNIV_DEBUG
-	dberr_t	err =
-#endif /* UNIV_DEBUG */
-		undo_trunc->start_logging(space_id);
-	ut_ad(err == DB_SUCCESS);
-
-	DBUG_EXECUTE_IF("ib_undo_trunc_before_truncate",
-			ib::info() << "ib_undo_trunc_before_truncate";
-			DBUG_SUICIDE(););
 
 	trx_purge_cleanse_purge_queue(undo_trunc);
 
@@ -1048,13 +986,10 @@ trx_purge_initiate_truncate(
 		purge_sys->rseg = NULL;
 	}
 
-	DBUG_EXECUTE_IF("ib_undo_trunc_before_ddl_log_end",
-			ib::info() << "ib_undo_trunc_before_ddl_log_end";
+	DBUG_EXECUTE_IF("ib_undo_trunc",
+			ib::info() << "ib_undo_trunc";
+			log_write_up_to(LSN_MAX, true);
 			DBUG_SUICIDE(););
-
-	log_make_checkpoint_at(LSN_MAX, TRUE);
-
-	undo_trunc->done_logging(space_id);
 
 	/* Completed truncate. Now it is safe to re-use the tablespace. */
 	for (ulint i = 0; i < undo_trunc->rsegs_size(); ++i) {
@@ -1066,10 +1001,6 @@ trx_purge_initiate_truncate(
 
 	undo_trunc->reset();
 	undo::Truncate::clear_trunc_list();
-
-	DBUG_EXECUTE_IF("ib_undo_trunc_trunc_done",
-			ib::info() << "ib_undo_trunc_trunc_done";
-			DBUG_SUICIDE(););
 }
 
 /********************************************************************//**
