@@ -1339,6 +1339,7 @@ parse_log:
 				redo log been written with something
 				older than InnoDB Plugin 1.0.4. */
 				ut_ad(offs == FIL_PAGE_TYPE
+				      || srv_is_undo_tablespace(space_id)
 				      || offs == IBUF_TREE_SEG_HEADER
 				      + IBUF_HEADER + FSEG_HDR_OFFSET
 				      || offs == PAGE_BTR_IBUF_FREE_LIST
@@ -1364,6 +1365,7 @@ parse_log:
 				ut_ad(0
 				      /* fil_crypt_rotate_page() writes this */
 				      || offs == FIL_PAGE_SPACE_ID
+				      || srv_is_undo_tablespace(space_id)
 				      || offs == IBUF_TREE_SEG_HEADER
 				      + IBUF_HEADER + FSEG_HDR_SPACE
 				      || offs == IBUF_TREE_SEG_HEADER
