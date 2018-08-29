@@ -951,12 +951,9 @@ trx_purge_initiate_truncate(
 
 
 	/* Step-3: Start the actual truncate.
-	a. optional redo log checkpoint, to avoid overflow during execution
-	b. Remove rseg instance if added to purge queue before we
+	a. Remove rseg instance if added to purge queue before we
 	   initiate truncate.
-	c. Execute actual truncate */
-
-	log_free_check();
+	b. Execute actual truncate */
 
 	const ulint space_id = undo_trunc->get_marked_space_id();
 
@@ -964,14 +961,129 @@ trx_purge_initiate_truncate(
 
 	trx_purge_cleanse_purge_queue(undo_trunc);
 
-	if (!trx_undo_truncate_tablespace(undo_trunc)) {
-		/* Note: In case of error we don't enable the rsegs
-		and neither unmark the tablespace so the tablespace
-		continue to remain inactive. */
-		ib::error() << "Failed to truncate UNDO tablespace "
-			<< space_id;
+	ut_a(srv_is_undo_tablespace(space_id));
+
+	/* Flush all to-be-discarded pages of the tablespace.
+
+	During truncation, we do not want any writes to the
+	to-be-discarded area, because we must set the space->size
+	early in order to have deterministic page allocation.
+
+	If a log checkpoint was completed at LSN earlier than our
+	mini-transaction commit and the server was killed, then
+	discarding the to-be-trimmed pages without flushing would
+	break crash recovery. So, we cannot avoid the write. */
+	{
+		FlushObserver observer(
+			space_id,
+			UT_LIST_GET_FIRST(purge_sys->query->thrs)->graph->trx,
+			NULL);
+		buf_LRU_flush_or_remove_pages(space_id, &observer);
+	}
+
+	log_free_check();
+
+	/* Adjust the tablespace metadata. */
+	fil_space_t* space = fil_truncate_prepare(space_id);
+
+	if (!space) {
+		ib::error() << "Failed to find UNDO tablespace " << space_id;
 		return;
 	}
+
+	/* Undo tablespace always are a single file. */
+	ut_a(UT_LIST_GET_LEN(space->chain) == 1);
+	fil_node_t* file = UT_LIST_GET_FIRST(space->chain);
+	/* The undo tablespace files are never closed. */
+	ut_ad(file->is_open());
+
+	/* Re-initialize tablespace, in a single mini-transaction. */
+	mtr_t mtr;
+	const ulint size = SRV_UNDO_TABLESPACE_SIZE_IN_PAGES;
+	mtr.start();
+	mtr_x_lock(&space->latch, &mtr);
+	fil_truncate_log(space, size, &mtr);
+	fsp_header_init(space_id, size, &mtr);
+	mutex_enter(&fil_system->mutex);
+	space->size = file->size = size;
+	mutex_exit(&fil_system->mutex);
+
+	for (ulint i = 0; i < undo_trunc->rsegs_size(); ++i) {
+		trx_rsegf_t*	rseg_header;
+
+		trx_rseg_t*	rseg = undo_trunc->get_ith_rseg(i);
+
+		rseg->page_no = trx_rseg_header_create(
+			space_id, ULINT_MAX, rseg->id, &mtr);
+
+		rseg_header = trx_rsegf_get_new(space_id, rseg->page_no, &mtr);
+
+		/* Before re-initialization ensure that we free the existing
+		structure. There can't be any active transactions. */
+		ut_a(UT_LIST_GET_LEN(rseg->update_undo_list) == 0);
+		ut_a(UT_LIST_GET_LEN(rseg->insert_undo_list) == 0);
+
+		trx_undo_t*	next_undo;
+
+		for (trx_undo_t* undo =
+			UT_LIST_GET_FIRST(rseg->update_undo_cached);
+		     undo != NULL;
+		     undo = next_undo) {
+
+			next_undo = UT_LIST_GET_NEXT(undo_list, undo);
+			UT_LIST_REMOVE(rseg->update_undo_cached, undo);
+			MONITOR_DEC(MONITOR_NUM_UNDO_SLOT_CACHED);
+			trx_undo_mem_free(undo);
+		}
+
+		for (trx_undo_t* undo =
+			UT_LIST_GET_FIRST(rseg->insert_undo_cached);
+		     undo != NULL;
+		     undo = next_undo) {
+
+			next_undo = UT_LIST_GET_NEXT(undo_list, undo);
+			UT_LIST_REMOVE(rseg->insert_undo_cached, undo);
+			MONITOR_DEC(MONITOR_NUM_UNDO_SLOT_CACHED);
+			trx_undo_mem_free(undo);
+		}
+
+		UT_LIST_INIT(rseg->update_undo_list, &trx_undo_t::undo_list);
+		UT_LIST_INIT(rseg->update_undo_cached, &trx_undo_t::undo_list);
+		UT_LIST_INIT(rseg->insert_undo_list, &trx_undo_t::undo_list);
+		UT_LIST_INIT(rseg->insert_undo_cached, &trx_undo_t::undo_list);
+
+		/* These were written by trx_rseg_header_create(). */
+		ut_ad(mach_read_from_4(rseg_header + TRX_RSEG_MAX_SIZE)
+		      == uint32_t(rseg->max_size));
+		ut_ad(!mach_read_from_4(rseg_header + TRX_RSEG_HISTORY_SIZE));
+
+		rseg->max_size = ULINT_MAX;
+
+		/* Initialize the undo log lists according to the rseg header */
+		rseg->curr_size = 1;
+		rseg->trx_ref_count = 0;
+		rseg->last_page_no = FIL_NULL;
+		rseg->last_offset = 0;
+		rseg->last_trx_no = 0;
+		rseg->last_del_marks = FALSE;
+	}
+
+	mtr.commit();
+	/* Write-ahead the redo log record. */
+	log_write_up_to(mtr.commit_lsn(), true);
+
+	/* Trim the file size. */
+	os_file_truncate(file->name, file->handle,
+			 os_offset_t(size) << srv_page_size_shift, true);
+
+	/* TODO: PUNCH_HOLE the garbage (with write-ahead logging) */
+
+	mutex_enter(&fil_system->mutex);
+	ut_ad(space->stop_new_ops);
+	ut_ad(space->is_being_truncated);
+	space->stop_new_ops = false;
+	space->is_being_truncated = false;
+	mutex_exit(&fil_system->mutex);
 
 	if (purge_sys->rseg != NULL
 	    && purge_sys->rseg->last_page_no == FIL_NULL) {
