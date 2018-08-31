@@ -13528,9 +13528,13 @@ int ha_innobase::truncate()
 	}
 
 	if (err) {
-#if MYSQL_VERSION_ID < 100303 /* MariaDB 10.3 does full rollback for RENAME */
+		/* Before MDEV-14717, rollback of RENAME TABLE fails
+		to undo the rename in the file system, so we do it
+		manually here. In case the server is killed before the
+		TRUNCATE operation is committed, after recovery in
+		MariaDB 10.2, the data file could end up "missing"
+		(remain called temp_name). */
 		innobase_rename_table(trx, temp_name, name);
-#endif
 		trx_rollback_to_savepoint(trx, NULL);
 	}
 
@@ -13539,7 +13543,11 @@ int ha_innobase::truncate()
 
 	if (!err) {
 		/* Reopen the newly created table, and drop the
-		original table that was renamed to temp_name. */
+		original table that was renamed to temp_name.
+
+		Note: In MariaDB 10.2 (before MDEV-14585), if the
+		server is killed and restarted before the original
+		table is dropped, the table will remain orphaned. */
 		close();
 		err = open(name, 0, 0);
 		if (!err) {
