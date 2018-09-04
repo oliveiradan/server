@@ -13384,7 +13384,7 @@ insert_values:
 
 values_list:
           values_list ','  no_braces
-        | no_braces
+        | no_braces_with_names
         ;
 
 ident_eq_list:
@@ -13437,9 +13437,29 @@ no_braces:
           }
         ;
 
+no_braces_with_names:
+          '('
+          {
+            if (unlikely(!(Lex->insert_list= new (thd->mem_root) List_item)))
+              MYSQL_YYABORT;
+          }
+          opt_values_with_names ')'
+          {
+            LEX *lex=Lex;
+            if (unlikely(lex->many_values.push_back(lex->insert_list,
+                                                    thd->mem_root)))
+              MYSQL_YYABORT;
+          }
+        ;
+
 opt_values:
           /* empty */ {}
         | values
+        ;
+
+opt_values_with_names:
+          /* empty */ {}
+        | values_with_names
         ;
 
 values:
@@ -13452,6 +13472,25 @@ values:
           {
             if (unlikely(Lex->insert_list->push_back($1, thd->mem_root)))
               MYSQL_YYABORT;
+          }
+        ;
+
+values_with_names:
+          values_with_names ','  remember_name expr_or_default remember_end
+          {
+            if (unlikely(Lex->insert_list->push_back($4, thd->mem_root)))
+               MYSQL_YYABORT;
+            // give some name in case of using in table value constuctor (TVC)
+            if (!$4->name.str || $4->name.str == item_empty_name)
+              $4->set_name(thd, $3, (uint) ($5 - $3), thd->charset());
+           }
+        | remember_name expr_or_default remember_end
+          {
+            if (unlikely(Lex->insert_list->push_back($2, thd->mem_root)))
+               MYSQL_YYABORT;
+            // give some name in case of using in table value constuctor (TVC)
+            if (!$2->name.str || $2->name.str == item_empty_name)
+              $2->set_name(thd, $1, (uint) ($3 - $1), thd->charset());
           }
         ;
 
