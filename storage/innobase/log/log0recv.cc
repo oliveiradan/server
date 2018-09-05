@@ -1085,6 +1085,7 @@ recv_find_max_checkpoint(ulint* max_field)
 	case LOG_HEADER_FORMAT_10_3:
 	case LOG_HEADER_FORMAT_10_3 | LOG_HEADER_FORMAT_ENCRYPTED:
 	case LOG_HEADER_FORMAT_ENC_10_4:
+		/* FIXME: refuse upgrade if LOG_HEADER_SUBFORMAT != 1 */
 		break;
 	default:
 		ib::error() << "Unsupported redo log format."
