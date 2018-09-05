@@ -519,7 +519,8 @@ marked for truncate.
 @param[in]	space	undo tablespace being truncated */
 static void trx_purge_cleanse_purge_queue(const fil_space_t& space)
 {
-	std::vector<TrxUndoRsegs> purge_elem_list;
+	typedef	std::vector<TrxUndoRsegs>	purge_elem_list_t;
+	purge_elem_list_t			purge_elem_list;
 
 	mutex_enter(&purge_sys.pq_mutex);
 
@@ -530,18 +531,21 @@ static void trx_purge_cleanse_purge_queue(const fil_space_t& space)
 		purge_sys.purge_queue.pop();
 	}
 
-	for (auto& p : purge_elem_list) {
-		for (TrxUndoRsegs::iterator it2 = p.begin();
-		     it2 != p.end();
+	for (purge_elem_list_t::iterator it = purge_elem_list.begin();
+	     it != purge_elem_list.end();
+	     ++it) {
+
+		for (TrxUndoRsegs::iterator it2 = it->begin();
+		     it2 != it->end();
 		     ++it2) {
 			if ((*it2)->space == &space) {
-				p.erase(it2);
+				it->erase(it2);
 				break;
 			}
 		}
 
-		if (!p.empty()) {
-			purge_sys.purge_queue.push(p);
+		if (!it->empty()) {
+			purge_sys.purge_queue.push(*it);
 		}
 	}
 
