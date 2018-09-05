@@ -40,7 +40,6 @@ extern my_bool srv_use_doublewrite_buf;
 extern struct buf_dblwr_t* buf_dblwr;
 struct trx_t;
 class page_id_t;
-class truncate_t;
 
 /** Structure containing encryption specification */
 struct fil_space_crypt_t;
