@@ -1065,6 +1065,7 @@ recv_find_max_checkpoint(ulint* max_field)
 	/* Check the header page checksum. There was no
 	checksum in the first redo log format (version 0). */
 	log_sys.log.format = mach_read_from_4(buf + LOG_HEADER_FORMAT);
+	log_sys.log.subformat = mach_read_from_4(buf + LOG_HEADER_SUBFORMAT);
 	if (log_sys.log.format != LOG_HEADER_FORMAT_3_23
 	    && !recv_check_log_header_checksum(buf)) {
 		ib::error() << "Invalid redo log header checksum.";
@@ -1085,7 +1086,6 @@ recv_find_max_checkpoint(ulint* max_field)
 	case LOG_HEADER_FORMAT_10_3:
 	case LOG_HEADER_FORMAT_10_3 | LOG_HEADER_FORMAT_ENCRYPTED:
 	case LOG_HEADER_FORMAT_ENC_10_4:
-		/* FIXME: refuse upgrade if LOG_HEADER_SUBFORMAT != 1 */
 		break;
 	default:
 		ib::error() << "Unsupported redo log format."
@@ -2053,6 +2053,17 @@ recv_apply_hashed_log_recs(bool last_batch)
 	ut_d(recv_no_log_write = recv_no_ibuf_operations);
 
 	if (ulint n = recv_sys->n_addrs) {
+		if (!log_sys.log.subformat && !srv_force_recovery
+		    && srv_undo_tablespaces_open) {
+			ib::error() << "Recovery of separately logged"
+				" TRUNCATE operations is no longer supported."
+				" Set innodb_force_recovery=1"
+				" if no *trunc.log files exist";
+			recv_sys->found_corrupt_log = true;
+			mutex_exit(&recv_sys->mutex);
+			return;
+		}
+
 		const char* msg = last_batch
 			? "Starting final batch to recover "
 			: "Starting a batch to recover ";

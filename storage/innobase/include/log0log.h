@@ -548,7 +548,10 @@ struct log_t{
     /** number of files */
     ulint				n_files;
     /** format of the redo log: e.g., LOG_HEADER_FORMAT_10_3 */
-    ulint				format;
+    uint32_t				format;
+    /** redo log subformat: 0 with separately logged TRUNCATE,
+    1 with fully redo-logged TRUNCATE */
+    uint32_t				subformat;
     /** individual log file size in bytes, including the header */
     lsn_t				file_size;
     /** lsn used to fix coordinates within the log group */
