@@ -1487,6 +1487,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
         assign_to_keycache_parts
         preload_list preload_list_or_parts preload_keys preload_keys_parts
         select_item_list select_item values_list no_braces
+        no_braces_with_names opt_values_with_names values_with_names
         delete_limit_clause fields opt_values values
         procedure_list procedure_list2 procedure_item
         field_def handler opt_generated_always
